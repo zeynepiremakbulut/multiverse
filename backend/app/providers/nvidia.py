@@ -306,7 +306,14 @@ class NvidiaProvider(BaseProvider):
 
         # Generous limits for multi-problem visual exam, deep reasoning, and long tables
         effective_max_tokens = 8192
-        effective_timeout = max(timeout or 90.0, 120.0)
+        # Nemotron Super VL 120B uses a "thinking" budget on top of output tokens.
+        # When content=None but reasoning_content is populated it means the model
+        # used all tokens on thinking (finish_reason='length'). We bump the budget
+        # to 16384 for vision models so there is room for BOTH thinking AND the
+        # actual answer text.
+        if is_vision or image_attachments:
+            effective_max_tokens = 16384
+        effective_timeout = max(timeout or 90.0, 150.0)
 
         start_time = time.perf_counter()
 
@@ -370,7 +377,6 @@ class NvidiaProvider(BaseProvider):
                 content = final_msg.content or getattr(final_msg, "reasoning_content", "") or ""
             elif msg.content and "<tool_call>" in msg.content:
                 # Some models (like Nemotron text variants) occasionally format tool calls directly as XML in message content
-                import re
                 qm = re.search(r"<parameter=query>([\s\S]*?)</parameter>", msg.content)
                 if not qm:
                     qm = re.search(r'query["\']?\s*:\s*["\']([^"\']+)["\']', msg.content)
@@ -397,7 +403,40 @@ class NvidiaProvider(BaseProvider):
                 final_msg = second_completion.choices[0].message
                 content = final_msg.content or getattr(final_msg, "reasoning_content", "") or ""
             else:
-                content = msg.content or getattr(msg, "reasoning_content", "") or ""
+                # --- PRIMARY FIX ---
+                # Nemotron Super VL 120B (and similar reasoning models) place their
+                # chain-of-thought in `reasoning_content` and the final answer in
+                # `content`.  When finish_reason=='length' (token budget exhausted
+                # during the thinking phase), `content` is None while
+                # `reasoning_content` holds a half-finished internal monologue.
+                # In that case we do a SECOND call without tools so the model just
+                # writes its answer directly, skipping the thinking phase.
+                raw_content = msg.content
+                raw_reasoning = getattr(msg, "reasoning_content", None)
+
+                if raw_content:
+                    content = raw_content
+                elif raw_reasoning:
+                    # Token budget hit during thinking. Try again with higher limit
+                    # and explicit instruction to output the answer, not thoughts.
+                    retry_messages = messages + [
+                        {
+                            "role": "assistant",
+                            "content": "Analiz tamamlandı. Aşağıda doğrudan Türkçe cevabı sunuyorum:"
+                        }
+                    ]
+                    retry_coroutine = client.chat.completions.create(
+                        model=model_id,
+                        messages=retry_messages,
+                        temperature=0.3,
+                        max_tokens=effective_max_tokens,
+                        timeout=effective_timeout
+                    )
+                    retry_completion = await asyncio.wait_for(retry_coroutine, timeout=effective_timeout)
+                    retry_msg = retry_completion.choices[0].message
+                    content = retry_msg.content or getattr(retry_msg, "reasoning_content", "") or ""
+                else:
+                    content = ""
 
             # ----------------------------------------------------------------
             # Final scrubbing pipeline — mirrors how ChatGPT/Gemini/Claude hide
