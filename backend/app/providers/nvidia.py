@@ -1,3 +1,4 @@
+import re
 import time
 import json
 import asyncio
@@ -10,6 +11,88 @@ from ddgs import DDGS
 from app.core.config import settings
 from app.providers.base import BaseProvider, ProviderResponse
 from app.providers.registry import model_registry
+
+# ---------------------------------------------------------------------------
+# Internal-thought scrubber
+# Models like Nemotron-SuperVL emit chain-of-thought inside <think>...</think>
+# or plain-text "Let me re-read…" preambles. We strip them before the user
+# ever sees the content, mirroring how ChatGPT / Gemini hide their reasoning.
+# ---------------------------------------------------------------------------
+_THINK_PATTERN = re.compile(
+    r"""(<think>[\s\S]*?</think>)         # <think>...</think> XML blocks
+      | (<thinking>[\s\S]*?</thinking>)   # <thinking>...</thinking>
+      | (<scratchpad>[\s\S]*?</scratchpad>)  # <scratchpad>...</scratchpad>
+      | (<tool_call>[\s\S]*?</tool_call>) # stray tool_call leakage
+      | (<function=[\w_]+>[\s\S]*?</function>)  # <function=…> XML
+    """,
+    re.VERBOSE,
+)
+
+_LEADING_THINK_PROSE = re.compile(
+    r"""^[\s\S]*?
+        (?:                                 # common internal-monologue markers
+            Let\s+me\s+(?:re-)?(?:read|parse|analyze|look|trace|try|think|solve|check)\b
+          | (?:Looking|Analyzing|Examining)\s+at\s+(?:the|this|S-\d)\b
+          | Actually,?\s+(?:let|looking|I\s+need|I\s+think|wait)\b
+          | (?:Wait|Hmm|OK),?\s
+          | (?:Now\s+I\s+see|I\s+see|I\s+need)
+          | Alright,?\s
+          | The\s+user\s+(?:wants|is\s+asking|asked|provided)
+          | (?:So\s+)?I\s+should\s+(?:look|check|analyze|solve|first)
+        )
+        [\s\S]+?\n{2,}                     # skip until a blank line
+    """,
+    re.VERBOSE,
+)
+
+
+def _scrub_thinking(raw: str) -> str:
+    """Remove internal reasoning blocks that should never reach the user."""
+    if not raw:
+        return raw
+    # 1. Remove XML-delimited thinking blocks
+    cleaned = _THINK_PATTERN.sub("", raw)
+    # 2. If the response still starts with chain-of-thought prose
+    #    (English internal monologue before the actual answer), strip up to
+    #    the first blank line that follows a recognisable CoT sentence.
+    #    We only do this when the content starts with known CoT preambles.
+    cot_starters = (
+        "Let me ", "Looking at ", "Analyzing ", "Wait,", "Wait!", "Hmm,",
+        "Actually,", "OK,", "Alright,", "The user ", "Now, ", "I need to ",
+        "I'll ", "I see ", "I think ", "So I ",
+    )
+    stripped = cleaned.lstrip()
+    if any(stripped.startswith(s) for s in cot_starters):
+        # Walk through paragraphs and drop all leading CoT paragraphs
+        paragraphs = re.split(r"\n{2,}", stripped)
+        kept = []
+        dropping = True
+        for para in paragraphs:
+            first_line = para.strip().split("\n")[0]
+            if dropping:
+                # Keep paragraph if it looks like actual structured output
+                if (
+                    first_line.startswith("#")           # markdown heading
+                    or first_line.startswith("**S-")     # S-1, S-2 etc.
+                    or first_line.startswith("**Çözüm")
+                    or first_line.startswith("**Sonuç")
+                    or re.match(r"^(S-\d|Soru\s*\d)", first_line)
+                    or re.match(r"^\d+[.)]\s", first_line)   # numbered list
+                    or first_line.startswith("---")
+                    or first_line.startswith("===")
+                    or "$$" in first_line                 # LaTeX
+                    or "\\(" in first_line
+                    or "\\[" in first_line
+                    # stopped dropping once > 50 chars without CoT starter
+                    or (len(para.strip()) > 50 and not any(first_line.startswith(s) for s in cot_starters))
+                ):
+                    dropping = False
+                    kept.append(para)
+            else:
+                kept.append(para)
+        if kept:
+            cleaned = "\n\n".join(kept)
+    return cleaned.strip()
 
 AVAILABLE_TOOLS = [
     {
@@ -194,12 +277,16 @@ class NvidiaProvider(BaseProvider):
 
         messages = []
         effective_sys = system_prompt
+
+        # Build a strong system prompt for vision+homework tasks
         if image_attachments and is_vision:
             vision_guidance = (
-                "Görseldeki tüm soruları, diyagramları, devre şemalarını ve bileşen değerlerini dikkatle incele. "
-                "İç karalamalarını veya İngilizce düşünce notlarını uzatmak yerine doğrudan kullanıcıya hitap ederek Türkçe dilinde, "
-                "soru soru (S-1, S-2...) adım adım analiz, uygulanan formüller (KVL, KCL, Ohm, Op-Amp vb.) ve net sayısal sonuçlarla "
-                "tertemiz, anlaşılır bir ödev/sınav çözümü sun."
+                "Sen uzman bir mühendis asistanısın. "
+                "Kullanıcının yüklediği görseldeki devre şemalarını, diyagramları ve ödev sorularını piksel düzeyinde analiz et. "
+                "ASLA İngilizce iç monolog, 'Let me re-read...', 'Actually...', 'Wait...' gibi karalama cümlesi yazma. "
+                "Doğrudan kullanıcıya hitap et: her soru için (S-1, S-2, S-3, S-4) "
+                "devre okuma → kullanılan yasa/formül → adım adım hesap → kutucuklu sayısal sonuç "
+                "şeklinde Türkçe ve tertemiz bir ödev çözümü sun."
             )
             effective_sys = f"{effective_sys}\n\n{vision_guidance}" if effective_sys else vision_guidance
 
@@ -312,16 +399,21 @@ class NvidiaProvider(BaseProvider):
             else:
                 content = msg.content or getattr(msg, "reasoning_content", "") or ""
 
-            # Ensure no stray internal tool tags leak into user-facing output
-            if "<tool_call>" in content or "<function=" in content:
-                import re
-                content = re.sub(r"<tool_call>[\s\S]*?</tool_call>", "", content)
-                content = re.sub(r"<tool_call>", "", content)
-                content = re.sub(r"</tool_call>", "", content)
-                content = re.sub(r"<function=[\w_]+>", "", content)
-                content = re.sub(r"</function>", "", content)
-                content = re.sub(r"<parameter=[\w_]+>", "", content)
-                content = re.sub(r"</parameter>", "", content).strip()
+            # ----------------------------------------------------------------
+            # Final scrubbing pipeline — mirrors how ChatGPT/Gemini/Claude hide
+            # their internal reasoning before presenting the user-facing answer.
+            # ----------------------------------------------------------------
+            # 1. Strip XML-delimited thinking blocks & stray tool tags
+            content = _scrub_thinking(content)
+            # 2. Remove any residual tool-call XML fragments
+            for pat in [
+                r"<tool_call>[\s\S]*?</tool_call>",
+                r"<tool_call>", r"</tool_call>",
+                r"<function=[\w_]+>", r"</function>",
+                r"<parameter=[\w_]+>", r"</parameter>",
+            ]:
+                content = re.sub(pat, "", content)
+            content = content.strip()
 
             elapsed_ms = round((time.perf_counter() - start_time) * 1000, 2)
 
