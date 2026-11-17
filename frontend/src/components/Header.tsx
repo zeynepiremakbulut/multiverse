@@ -1,11 +1,12 @@
 import React from 'react';
-import { Menu, Layers, ShieldCheck, ShieldAlert, Globe } from 'lucide-react';
+import { Layers, ShieldCheck, ShieldAlert, Globe, PanelLeftClose, PanelLeftOpen } from 'lucide-react';
 import { ModelInfo, ProviderHealth } from '../types';
 import { Logo } from './Logo';
 import { useLanguage } from '../i18n/LanguageContext';
 
 interface HeaderProps {
   onToggleSidebar: () => void;
+  isSidebarOpen?: boolean;
   selectedModels: ModelInfo[];
   onOpenModelSelector: () => void;
   activeConversationTitle?: string;
@@ -15,6 +16,7 @@ interface HeaderProps {
 
 export const Header: React.FC<HeaderProps> = ({
   onToggleSidebar,
+  isSidebarOpen = true,
   selectedModels,
   onOpenModelSelector,
   activeConversationTitle,
@@ -25,21 +27,25 @@ export const Header: React.FC<HeaderProps> = ({
   const isKeyConfigured = health?.api_key_set ?? false;
 
   return (
-    <header className="h-14 border-b border-slate-800/80 bg-space-900/80 backdrop-blur-md px-4 flex items-center justify-between z-30 shrink-0">
-      <div className="flex items-center gap-3 min-w-0">
+    <header className="h-12 border-b border-slate-800/80 bg-space-900/80 backdrop-blur-md px-3 sm:px-4 flex items-center justify-between z-30 shrink-0">
+      <div className="flex items-center gap-2.5 min-w-0">
         <button
           onClick={onToggleSidebar}
-          className="p-1.5 rounded-lg text-slate-400 hover:text-slate-100 hover:bg-space-800 transition-colors lg:hidden"
-          title="Open sidebar"
+          className="p-1.5 rounded-lg text-slate-400 hover:text-cyan-300 hover:bg-space-800 transition-colors"
+          title={isSidebarOpen ? "Kenar Çubuğunu Daralt" : "Kenar Çubuğunu Genişlet"}
         >
-          <Menu className="w-5 h-5" />
+          {isSidebarOpen ? (
+            <PanelLeftClose className="w-4 h-4" />
+          ) : (
+            <PanelLeftOpen className="w-4 h-4 text-cyan-400" />
+          )}
         </button>
 
         <div className="flex items-center gap-2 min-w-0">
           <div className="hidden sm:block">
-            <Logo size={24} />
+            <Logo size={22} />
           </div>
-          <span className="font-semibold text-sm text-slate-200 truncate">
+          <span className="font-semibold text-xs sm:text-sm text-slate-200 truncate">
             {activeConversationTitle || t.newComparison}
           </span>
         </div>

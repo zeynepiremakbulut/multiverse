@@ -37,7 +37,23 @@ export const App: React.FC = () => {
 
   // Health & UI Modals
   const [health, setHealth] = useState<ProviderHealth | null>(null);
-  const [isSidebarOpen, setIsSidebarOpen] = useState<boolean>(false);
+  const [isSidebarOpen, setIsSidebarOpen] = useState<boolean>(() => {
+    if (typeof window !== 'undefined') {
+      const saved = localStorage.getItem('multiverse_sidebar_open');
+      if (saved !== null) return saved === 'true';
+      return window.innerWidth >= 1280; // default open on wide desktop screens
+    }
+    return true;
+  });
+
+  const handleToggleSidebar = () => {
+    setIsSidebarOpen((prev) => {
+      const next = !prev;
+      localStorage.setItem('multiverse_sidebar_open', String(next));
+      return next;
+    });
+  };
+
   const [isModelSelectorOpen, setIsModelSelectorOpen] = useState<boolean>(false);
   const [isKeyModalOpen, setIsKeyModalOpen] = useState<boolean>(false);
 
@@ -361,7 +377,8 @@ export const App: React.FC = () => {
       <div className="flex-1 flex flex-col min-w-0 h-full overflow-hidden">
         {/* Top Header */}
         <Header
-          onToggleSidebar={() => setIsSidebarOpen(!isSidebarOpen)}
+          onToggleSidebar={handleToggleSidebar}
+          isSidebarOpen={isSidebarOpen}
           selectedModels={selectedModelObjects}
           onOpenModelSelector={() => setIsModelSelectorOpen(true)}
           activeConversationTitle={activeConversation?.title}
@@ -378,7 +395,7 @@ export const App: React.FC = () => {
               }}
             />
           ) : (
-            <div className="flex-1 pb-4">
+            <div className="flex-1 pb-2">
               <ComparisonGrid
                 turns={turns}
                 onRetryModel={handleRetryModel}
@@ -389,15 +406,17 @@ export const App: React.FC = () => {
           )}
         </main>
 
-        {/* Intelligent Routing Assistant Banner */}
-        <div className="w-full max-w-5xl mx-auto px-4 pb-2">
-          <RoutingBadge
-            routeInfo={routeInfo}
-            onApplyRecommendation={(mIds) => setSelectedModelIds(mIds)}
-            isAutoRouteEnabled={isAutoRouteEnabled}
-            onToggleAutoRoute={() => setIsAutoRouteEnabled(!isAutoRouteEnabled)}
-          />
-        </div>
+        {/* Intelligent Routing Assistant Banner - Only shown when active or recommendation exists */}
+        {(routeInfo || isAutoRouteEnabled) && (
+          <div className="w-full max-w-5xl mx-auto px-4 pb-1">
+            <RoutingBadge
+              routeInfo={routeInfo}
+              onApplyRecommendation={(mIds) => setSelectedModelIds(mIds)}
+              isAutoRouteEnabled={isAutoRouteEnabled}
+              onToggleAutoRoute={() => setIsAutoRouteEnabled(!isAutoRouteEnabled)}
+            />
+          </div>
+        )}
 
         {/* Prompt Input Area */}
         <ChatInput

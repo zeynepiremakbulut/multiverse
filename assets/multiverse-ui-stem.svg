@@ -1,0 +1,190 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 680" width="100%" height="100%">
+  <defs>
+    <linearGradient id="bg-grad-dark" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#050811" />
+      <stop offset="50%" stop-color="#090E17" />
+      <stop offset="100%" stop-color="#050811" />
+    </linearGradient>
+
+    <linearGradient id="glow-cyan-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#00F0FF" />
+      <stop offset="100%" stop-color="#3B82F6" />
+    </linearGradient>
+
+    <linearGradient id="card-border-vl" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#10B981" stop-opacity="0.9" />
+      <stop offset="100%" stop-color="#059669" stop-opacity="0.3" />
+    </linearGradient>
+
+    <filter id="neon-glow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="6" result="blur" />
+      <feComposite in="SourceGraphic" in2="blur" operator="over" />
+    </filter>
+
+    <style>
+      .txt-title { font-family: -apple-system, BlinkMacSystemFont, 'Inter', sans-serif; font-weight: 700; fill: #F8FAFC; }
+      .txt-sub { font-family: -apple-system, BlinkMacSystemFont, 'Inter', sans-serif; font-weight: 500; fill: #94A3B8; }
+      .txt-code { font-family: 'JetBrains Mono', 'Fira Code', monospace; }
+      .pulse-dot { animation: dotPulse 2s infinite ease-in-out; }
+      @keyframes dotPulse {
+        0%, 100% { opacity: 1; transform: scale(1); }
+        50% { opacity: 0.4; transform: scale(0.85); }
+      }
+    </style>
+  </defs>
+
+  <!-- Background Canvas -->
+  <rect width="1200" height="680" rx="16" fill="url(#bg-grad-dark)" stroke="#1E293B" stroke-width="2"/>
+
+  <!-- Left Collapsible Sidebar (Collapsed Indicator & Expand Pill) -->
+  <g transform="translate(16, 20)">
+    <rect width="48" height="640" rx="12" fill="#0D131F" stroke="#1E293B" stroke-width="1"/>
+    <!-- Toggle Button Icon -->
+    <rect x="8" y="12" width="32" height="32" rx="8" fill="#162032" stroke="#334155" stroke-width="1"/>
+    <path d="M18 20h12M18 28h12M18 36h7" stroke="#38BDF8" stroke-width="2" stroke-linecap="round"/>
+    
+    <!-- Collapsed Tool Icons -->
+    <circle cx="24" cy="80" r="14" fill="#1E293B"/>
+    <text x="19" y="85" font-family="sans-serif" font-weight="700" font-size="12" fill="#38BDF8">+</text>
+
+    <rect x="14" y="115" width="20" height="20" rx="4" fill="#162032" stroke="#334155" stroke-width="1"/>
+    <rect x="14" y="145" width="20" height="20" rx="4" fill="#162032" stroke="#334155" stroke-width="1"/>
+    
+    <circle cx="24" cy="610" r="5" fill="#10B981" class="pulse-dot"/>
+  </g>
+
+  <!-- Top Slim Header -->
+  <g transform="translate(80, 20)">
+    <rect width="1104" height="48" rx="10" fill="#0D131F" stroke="#1E293B" stroke-width="1"/>
+    
+    <!-- Title and Logo -->
+    <circle cx="26" cy="24" r="10" fill="url(#glow-cyan-grad)"/>
+    <text x="48" y="29" class="txt-title" font-size="15" letter-spacing="1">MULTIVERSE</text>
+    <text x="160" y="29" class="txt-sub" font-size="11">One question. Multiple minds.</text>
+    
+    <!-- Header Controls -->
+    <g transform="translate(800, 10)">
+      <rect width="125" height="28" rx="6" fill="#162032" stroke="#334155" stroke-width="1"/>
+      <text x="14" y="18" class="txt-title" font-size="11" fill="#38BDF8">⚡ 2 Models Active</text>
+
+      <rect x="135" y="0" width="150" height="28" rx="6" fill="#064E3B" fill-opacity="0.3" stroke="#059669" stroke-width="1"/>
+      <circle cx="150" cy="14" r="4" fill="#10B981"/>
+      <text x="162" y="18" class="txt-title" font-size="11" fill="#34D399">NVIDIA NIM: Healthy</text>
+    </g>
+  </g>
+
+  <!-- User Query Bar (Visual Multimodal + Text) -->
+  <g transform="translate(80, 80)">
+    <rect width="1104" height="54" rx="10" fill="#0E1626" stroke="#334155" stroke-width="1"/>
+    
+    <!-- Image Badge Preview -->
+    <rect x="14" y="11" width="32" height="32" rx="6" fill="#162032" stroke="#10B981" stroke-width="1.5"/>
+    <text x="21" y="31" font-size="14">🖼️</text>
+    
+    <text x="56" y="24" class="txt-sub" font-size="10">ATTACHMENT: donem_odevi_devreler.png (371 KB)</text>
+    <text x="56" y="42" class="txt-title" font-size="13">"hocam şu sorulara bi el atar mısın hepsini ilk ilkelerden adım adım çöz"</text>
+    
+    <!-- Auto STEM Mode Tag -->
+    <rect x="940" y="13" width="150" height="28" rx="6" fill="#042F2E" stroke="#0D9488" stroke-width="1"/>
+    <text x="955" y="31" class="txt-title" font-size="11" fill="#2DD4BF">✓ STEM First-Principles</text>
+  </g>
+
+  <!-- 2-Column Responsive Workspace Grid -->
+
+  <!-- CARD 1: Nemotron Super VL 120B (Multimodal Circuit Solution) -->
+  <g transform="translate(80, 146)">
+    <rect width="542" height="440" rx="12" fill="#080D17" stroke="url(#card-border-vl)" stroke-width="1.5"/>
+    
+    <!-- Header -->
+    <rect width="542" height="44" rx="12" fill="#0F172A" stroke="#1E293B" stroke-width="1"/>
+    <text x="16" y="24" class="txt-title" font-size="13">Nemotron Super VL 120B</text>
+    <text x="16" y="38" class="txt-sub" font-size="10" fill="#10B981">Multimodal STEM Specialist • 4-Argon Tier</text>
+    <rect x="440" y="10" width="88" height="24" rx="6" fill="#1E293B"/>
+    <text x="450" y="26" class="txt-code" font-size="11" fill="#34D399">⏱ 34.5 s</text>
+
+    <!-- Solution Body with Rendered LaTeX -->
+    <g transform="translate(16, 56)">
+      <text x="0" y="18" class="txt-title" font-size="12" fill="#E2E8F0">S-2 (25p) Transistör Devresi DC Analizi</text>
+      <text x="0" y="38" class="txt-sub" font-size="11">Standart üniversite kabulü: \beta = 100, V_{BE} = 0.7 V, V_{EE} = -20 V</text>
+
+      <!-- Formula Box -->
+      <rect x="0" y="52" width="510" height="58" rx="8" fill="#0B132B" stroke="#1E293B" stroke-width="1"/>
+      <text x="14" y="74" class="txt-code" font-size="12" fill="#38BDF8">I_B = (V_EE - V_BE) / [R_B + (β + 1)R_E]</text>
+      <text x="14" y="96" class="txt-code" font-size="12" fill="#38BDF8">I_B = (20 - 0.7) / [240k + 101(2k)] = 19.3V / 442kΩ = 43.67 µA</text>
+
+      <text x="0" y="132" class="txt-title" font-size="12" fill="#E2E8F0">Kollektör Akımı ve Çıkış Gerilimi ($V_{CE}$):</text>
+      <rect x="0" y="146" width="510" height="52" rx="8" fill="#0B132B" stroke="#1E293B" stroke-width="1"/>
+      <text x="14" y="168" class="txt-code" font-size="12" fill="#C084FC">I_C = β * I_B = 100 * 43.67 µA = 4.37 mA</text>
+      <text x="14" y="188" class="txt-code" font-size="12" fill="#C084FC">V_CE = V_C - V_E = 0 - (-11.18V) = +11.18 V (Aktif Bölge)</text>
+
+      <!-- Boxed Results Pill -->
+      <rect x="0" y="214" width="510" height="42" rx="8" fill="#064E3B" fill-opacity="0.3" stroke="#059669" stroke-width="1.5"/>
+      <text x="14" y="240" class="txt-title" font-size="13" fill="#34D399">SONUÇ:  [ I_C ≈ 4.37 mA ]   |   [ V_CE ≈ 11.18 V ]</text>
+
+      <text x="0" y="282" class="txt-title" font-size="12" fill="#E2E8F0">S-3 (25p) JFET Shockley Eğrisi Çözümü:</text>
+      <text x="0" y="302" class="txt-sub" font-size="11">I_D = I_DSS * (1 - V_GS / V_P)^2  ==>  I_DQ = 2.59 mA, V_DS = 8.86 V</text>
+      
+      <!-- Verification Badge -->
+      <rect x="0" y="324" width="260" height="26" rx="6" fill="#1E293B"/>
+      <text x="12" y="341" class="txt-code" font-size="11" fill="#38BDF8">✓ KaTeX Doğrulandı • Sıfır CoT Sızıntısı</text>
+    </g>
+  </g>
+
+  <!-- CARD 2: Nemotron 3.5 Lightning (Mathematical Verifier) -->
+  <g transform="translate(642, 146)">
+    <rect width="542" height="440" rx="12" fill="#080D17" stroke="#334155" stroke-width="1.5"/>
+    
+    <!-- Header -->
+    <rect width="542" height="44" rx="12" fill="#0F172A" stroke="#1E293B" stroke-width="1"/>
+    <text x="16" y="24" class="txt-title" font-size="13">Nemotron 3.5 Lightning</text>
+    <text x="16" y="38" class="txt-sub" font-size="10" fill="#818CF8">Mathematical &amp; Logic Engine • GPT-5 Tier</text>
+    <rect x="440" y="10" width="88" height="24" rx="6" fill="#1E293B"/>
+    <text x="450" y="26" class="txt-code" font-size="11" fill="#38BDF8">⏱ 2.66 s</text>
+
+    <!-- Body -->
+    <g transform="translate(16, 56)">
+      <text x="0" y="18" class="txt-title" font-size="12" fill="#E2E8F0">Düğüm ve KVL Denklemleri Doğrulaması:</text>
+      <text x="0" y="38" class="txt-sub" font-size="11">Transistörün aktif bölge süreklilik şartı (V_CB > 0):</text>
+
+      <rect x="0" y="52" width="510" height="74" rx="8" fill="#111726" stroke="#1E293B" stroke-width="1"/>
+      <text x="14" y="74" class="txt-code" font-size="12" fill="#F43F5E">V_B = -I_B * R_B = -43.67 µA * 240 kΩ = -10.48 V</text>
+      <text x="14" y="94" class="txt-code" font-size="12" fill="#F43F5E">V_CB = V_C - V_B = 0 - (-10.48) = +10.48 V > 0</text>
+      <text x="14" y="114" class="txt-code" font-size="11" fill="#34D399">✓ Kolektör-Taban ters kutuplanmış, transistör aktif bölgede.</text>
+
+      <text x="0" y="150" class="txt-title" font-size="12" fill="#E2E8F0">Op-Amp (S-4) Non-Inverting Bölücü Analizi:</text>
+      <rect x="0" y="164" width="510" height="70" rx="8" fill="#111726" stroke="#1E293B" stroke-width="1"/>
+      <text x="14" y="186" class="txt-code" font-size="12" fill="#38BDF8">V_+ = 6V * (8kΩ / (4kΩ + 8kΩ)) = 4.0 V</text>
+      <text x="14" y="206" class="txt-code" font-size="12" fill="#38BDF8">A_v = 1 + (R_f / R_in) = 1 + (5k / 2k) = 3.5</text>
+      <text x="14" y="224" class="txt-code" font-size="12" fill="#F59E0B">V_o = 4.0 V * 3.5 = +14.0 V</text>
+
+      <!-- Proof Box -->
+      <rect x="0" y="250" width="510" height="42" rx="8" fill="#1E293B" stroke="#334155" stroke-width="1"/>
+      <text x="14" y="276" class="txt-title" font-size="13" fill="#38BDF8">DOĞRULAMA VERİĞİ:  Sanal Toprak Yoktur, V_o = +14.0 V</text>
+      
+      <rect x="0" y="324" width="280" height="26" rx="6" fill="#1E293B"/>
+      <text x="12" y="341" class="txt-code" font-size="11" fill="#A855F7">✓ 2 Model Eşzamanlı Mutabakatı (Consensus)</text>
+    </g>
+  </g>
+
+  <!-- Bottom Streamlined Floating Chat Input Bar -->
+  <g transform="translate(80, 600)">
+    <rect width="1104" height="60" rx="12" fill="#0D131F" stroke="#334155" stroke-width="1.5"/>
+    
+    <!-- Action Icons -->
+    <rect x="12" y="14" width="32" height="32" rx="8" fill="#162032" stroke="#334155" stroke-width="1"/>
+    <text x="21" y="34" font-size="14">📎</text>
+
+    <rect x="52" y="14" width="32" height="32" rx="8" fill="#162032" stroke="#334155" stroke-width="1"/>
+    <text x="61" y="34" font-size="14">🌐</text>
+
+    <!-- Input Text Area Mockup -->
+    <text x="96" y="34" class="txt-sub" font-size="13">Bir soru sorun veya yeni bir devre şeması / kod yükleyin...</text>
+
+    <!-- Enhance & Send Button -->
+    <rect x="940" y="14" width="95" height="32" rx="8" fill="#2E1065" stroke="#7E22CE" stroke-width="1"/>
+    <text x="955" y="34" class="txt-title" font-size="11" fill="#C084FC">✨ Geliştir</text>
+
+    <rect x="1045" y="14" width="46" height="32" rx="8" fill="#06B6D4"/>
+    <text x="1062" y="34" font-size="13">➤</text>
+  </g>
+</svg>

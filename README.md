@@ -21,9 +21,27 @@
 
 ---
 
-## 🎬 Live Interactive Preview
+## 🎬 Live Interactive Interface Preview
 
-![Multiverse Interface Preview](./assets/multiverse-demo.svg)
+<div align="center">
+
+### 1. Multi-Column Code & Frontier Synthesis Workspace
+![Multiverse Code & Frontier Interface Preview](./assets/multiverse-demo.svg)
+
+### 2. Universal STEM First-Principles & Multimodal Circuit Workspace
+![Multiverse STEM & Circuit Interface Preview](./assets/multiverse-ui-stem.svg)
+
+</div>
+
+---
+
+## 🎨 Streamlined UI & Workspace Features
+
+- 📱 **Collapsible Responsive Sidebar**: Toggleable sidebar on both desktop and mobile with smooth CSS width transitions. Keeps your screen uncluttered and expands the comparison columns to maximum width with a single click.
+- 📐 **Universal STEM First-Principles Engine**: Nodal KVL/KCL, Newton dynamics, and calculus derivations with strict academic defaults ($\beta=100$, $V_{BE}=0.7\text{ V}$) and balanced KaTeX equation rendering.
+- ⌨️ **Compact Floating Input Bar**: Streamlined 34px action buttons and auto-expanding prompt textarea that preserve maximum vertical viewport height for reading comparisons.
+- 🌐 **Autonomous Web Search & Platform Discovery**: Parallel search query expansion with direct markdown links `[Position](URL)` and automated `<tool_call>` degeneration guards.
+- ⏱️ **Live Millisecond Latency Benchmarks**: High-resolution response timers directly on each card so you can evaluate speed vs. quality tradeoffs in real-time.
 
 ---
 
