@@ -6,17 +6,17 @@ import urllib.parse
 from typing import Optional, List, Dict, Any, Tuple
 import requests
 from lxml import html
-from openai import AsyncOpenAI, APIError, AuthenticationError, RateLimitError
+from openai import AsyncOpenAI, APIError, AuthenticationError, RateLimitError, APIConnectionError
 from ddgs import DDGS
 from app.core.config import settings
 from app.providers.base import BaseProvider, ProviderResponse
 from app.providers.registry import model_registry
 
 # ---------------------------------------------------------------------------
-# Internal-thought scrubber
-# Models like Nemotron-SuperVL emit chain-of-thought inside <think>...</think>
-# or plain-text "Let me re-read…" preambles. We strip them before the user
-# ever sees the content, mirroring how ChatGPT / Gemini hide their reasoning.
+# Internal-thought scrubber & CoT sanitizer
+# Models like Nemotron-SuperVL emit chain-of-thought inside <think>...</think>,
+# stray <tool_call> tokens, or plain-text bulleted scratchpads.
+# We scrub them thoroughly before user-facing display.
 # ---------------------------------------------------------------------------
 _THINK_PATTERN = re.compile(
     r"""(<think>[\s\S]*?</think>)         # <think>...</think> XML blocks
@@ -28,84 +28,101 @@ _THINK_PATTERN = re.compile(
     re.VERBOSE,
 )
 
-_LEADING_THINK_PROSE = re.compile(
-    r"""^[\s\S]*?
-        (?:                                 # common internal-monologue markers
-            Let\s+me\s+(?:re-)?(?:read|parse|analyze|look|trace|try|think|solve|check)\b
-          | (?:Looking|Analyzing|Examining)\s+at\s+(?:the|this|S-\d)\b
-          | Actually,?\s+(?:let|looking|I\s+need|I\s+think|wait)\b
-          | (?:Wait|Hmm|OK),?\s
-          | (?:Now\s+I\s+see|I\s+see|I\s+need)
-          | Alright,?\s
-          | The\s+user\s+(?:wants|is\s+asking|asked|provided)
-          | (?:So\s+)?I\s+should\s+(?:look|check|analyze|solve|first)
-        )
-        [\s\S]+?\n{2,}                     # skip until a blank line
-    """,
-    re.VERBOSE,
-)
-
 
 def _scrub_thinking(raw: str) -> str:
-    """Remove internal reasoning blocks that should never reach the user."""
+    """Remove internal reasoning blocks, tool tokens, and internal monologue scratchpads."""
     if not raw:
-        return raw
-    # 1. Remove XML-delimited thinking blocks
+        return ""
+
+    # 1. Remove XML-delimited thinking blocks and tool call fragments
     cleaned = _THINK_PATTERN.sub("", raw)
-    # 2. If the response still starts with chain-of-thought prose
-    #    (English internal monologue before the actual answer), strip up to
-    #    the first blank line that follows a recognisable CoT sentence.
-    #    We only do this when the content starts with known CoT preambles.
+
+    # 2. Strip any bare or repeating tool-call tags (e.g. runaway <tool_call> loops)
+    for pat in [
+        r"<tool_call>[\s\S]*?</tool_call>",
+        r"<tool_call>", r"</tool_call>",
+        r"<function=[\w_]+>[\s\S]*?</function>",
+        r"<function=[\w_]+>", r"</function>",
+        r"<parameter=[\w_]+>[\s\S]*?</parameter>",
+        r"<parameter=[\w_]+>", r"</parameter>",
+    ]:
+        cleaned = re.sub(pat, "", cleaned)
+
+    # 3. Clean leading chain-of-thought prose or bulleted hypotheses
     cot_starters = (
         "Let me ", "Looking at ", "Analyzing ", "Wait,", "Wait!", "Hmm,",
         "Actually,", "OK,", "Alright,", "The user ", "Now, ", "I need to ",
-        "I'll ", "I see ", "I think ", "So I ",
+        "I'll ", "I see ", "I think ", "So I ", "Examining ",
     )
-    stripped = cleaned.lstrip()
-    if any(stripped.startswith(s) for s in cot_starters):
-        # Walk through paragraphs and drop all leading CoT paragraphs
-        paragraphs = re.split(r"\n{2,}", stripped)
-        kept = []
-        dropping = True
-        for para in paragraphs:
-            first_line = para.strip().split("\n")[0]
-            if dropping:
-                # Keep paragraph if it looks like actual structured output
-                if (
-                    first_line.startswith("#")           # markdown heading
-                    or first_line.startswith("**S-")     # S-1, S-2 etc.
-                    or first_line.startswith("**Çözüm")
-                    or first_line.startswith("**Sonuç")
-                    or re.match(r"^(S-\d|Soru\s*\d)", first_line)
-                    or re.match(r"^\d+[.)]\s", first_line)   # numbered list
-                    or first_line.startswith("---")
-                    or first_line.startswith("===")
-                    or "$$" in first_line                 # LaTeX
-                    or "\\(" in first_line
-                    or "\\[" in first_line
-                    # stopped dropping once > 50 chars without CoT starter
-                    or (len(para.strip()) > 50 and not any(first_line.startswith(s) for s in cot_starters))
-                ):
-                    dropping = False
-                    kept.append(para)
-            else:
+
+    paragraphs = re.split(r"\n{2,}", cleaned.strip())
+    kept = []
+    dropping = True
+    for para in paragraphs:
+        stripped_p = para.strip()
+        if not stripped_p:
+            continue
+        first_line = stripped_p.split("\n")[0].strip()
+        if dropping:
+            # Detect English bulleted monologue (e.g. • "4 kΩ" is above..., • Another possibility:...)
+            is_bullet_cot = (
+                (first_line.startswith("•") or first_line.startswith("*") or first_line.startswith("-"))
+                and any(m in stripped_p.lower() for m in [
+                    "is above", "is written in", "possibly", "another possibility",
+                    "no drop across", "if 8k", "makes use of", "divider"
+                ])
+            )
+            is_prose_cot = any(first_line.startswith(s) for s in cot_starters)
+
+            is_structured = (
+                first_line.startswith("#")           # markdown heading
+                or first_line.startswith("**S-")     # S-1, S-2 etc.
+                or first_line.startswith("**Çözüm")
+                or first_line.startswith("**Sonuç")
+                or bool(re.match(r"^(S-\d|Soru\s*\d)", first_line, re.IGNORECASE))
+                or bool(re.match(r"^\d+[.)]\s", first_line))   # numbered list
+                or first_line.startswith("---")
+                or first_line.startswith("===")
+                or "$$" in first_line                 # LaTeX
+                or "\\(" in first_line
+                or "\\[" in first_line
+            )
+            if is_structured or (len(stripped_p) > 50 and not is_bullet_cot and not is_prose_cot):
+                dropping = False
                 kept.append(para)
-        if kept:
-            cleaned = "\n\n".join(kept)
+        else:
+            kept.append(para)
+
+    if kept:
+        cleaned = "\n\n".join(kept)
     return cleaned.strip()
+
+
+def _is_unstructured_cot(text: str) -> bool:
+    """Checks if text consists purely of internal English scratchpad bullet points without a real solution."""
+    if not text:
+        return False
+    cot_markers = [
+        "is above", "is written in", "possibly labeling", "another possibility",
+        "if 8k", "no drop across", "makes use of both", "let me ", "looking at the diagram"
+    ]
+    has_cot = sum(1 for m in cot_markers if m in text.lower()) >= 2
+    has_solution = any(kw in text for kw in ["S-1", "Soru 1", "Çözüm", "Sonuç", "\\boxed{", "Direnç", "Gerilim", "Adım", "Akım"])
+    return has_cot and not has_solution
+
 
 AVAILABLE_TOOLS = [
     {
         "type": "function",
         "function": {
             "name": "web_search",
-            "description": "Searches the live internet for active job listings, internships, real-time facts, current news, official docs, or verified links. Call this whenever answering requires up-to-date or specific external web data.",
+            "description": "Searches the live internet for active job listings, internships, real-time facts, current news, official docs, or verified links. When searching for jobs or internships, provide specific English/global keywords (e.g. 'ROS 2 robotics internship remote 2025') along with target job boards (LinkedIn, Indeed, Wellfound) to retrieve active listings.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "query": {
                         "type": "string",
-                        "description": "Targeted search keywords (in English or Turkish) optimized to find relevant listings or pages."
+                        "description": "Targeted search keywords optimized to find relevant listings or pages."
                     }
                 },
                 "required": ["query"]
@@ -113,6 +130,7 @@ AVAILABLE_TOOLS = [
         }
     }
 ]
+
 
 def _clean_url(href: str) -> str:
     if not href:
@@ -128,34 +146,46 @@ def _clean_url(href: str) -> str:
         return "https:" + href
     return href
 
-def _sync_web_search(query: str, max_results: int = 5) -> Tuple[str, List[Dict[str, str]]]:
-    items: List[Dict[str, str]] = []
-    
-    # 1. Primary: Direct DDG HTML query (fast, bypasses bot challenges, returns direct job/career URLs)
-    try:
-        resp = requests.post(
-            "https://html.duckduckgo.com/html/",
-            data={"q": query},
-            headers={"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"},
-            timeout=6
-        )
-        if resp.status_code == 200:
-            tree = html.fromstring(resp.content)
-            for r in tree.xpath('//div[contains(@class, "result__body")]'):
-                title_elem = r.xpath('.//h2/a')
-                snippet_elem = r.xpath('.//a[contains(@class, "result__snippet")]')
-                if title_elem:
-                    title = "".join(title_elem[0].xpath('.//text()')).strip()
-                    href = _clean_url(title_elem[0].get("href", ""))
-                    snippet = "".join(snippet_elem[0].xpath('.//text()')).strip() if snippet_elem else ""
-                    if title and href and not href.startswith("https://duckduckgo.com"):
-                        items.append({"title": title, "link": href, "snippet": snippet})
-                        if len(items) >= max_results:
-                            break
-    except Exception as e:
-        print(f"[_sync_web_search HTML search error for '{query}']: {e}")
 
-    # 2. Fallback to ddgs library if HTML returned no results
+def _sync_web_search(query: str, max_results: int = 6) -> Tuple[str, List[Dict[str, str]]]:
+    items: List[Dict[str, str]] = []
+    seen_links = set()
+
+    is_job_query = any(k in query.lower() for k in ["staj", "intern", "job", "iş", "career", "remote", "ilan"])
+    queries = [query]
+    if is_job_query:
+        clean_q = re.sub(r"\b(bana|en az \d+|tane|adet|bul|ara|için|uygun|yüksek)\b", "", query, flags=re.IGNORECASE).strip()
+        queries.append(f"{clean_q} remote internship apply 2025 2026")
+        queries.append(f"{clean_q} site:linkedin.com/jobs OR site:indeed.com OR site:wellfound.com")
+
+    for q in queries[:2]:
+        try:
+            resp = requests.post(
+                "https://html.duckduckgo.com/html/",
+                data={"q": q},
+                headers={"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"},
+                timeout=6
+            )
+            if resp.status_code == 200:
+                tree = html.fromstring(resp.content)
+                for r in tree.xpath('//div[contains(@class, "result__body")]'):
+                    title_elem = r.xpath('.//h2/a')
+                    snippet_elem = r.xpath('.//a[contains(@class, "result__snippet")]')
+                    if title_elem:
+                        title = "".join(title_elem[0].xpath('.//text()')).strip()
+                        href = _clean_url(title_elem[0].get("href", ""))
+                        snippet = "".join(snippet_elem[0].xpath('.//text()')).strip() if snippet_elem else ""
+                        if title and href and not href.startswith("https://duckduckgo.com") and href not in seen_links:
+                            seen_links.add(href)
+                            items.append({"title": title, "link": href, "snippet": snippet})
+                            if len(items) >= max_results:
+                                break
+        except Exception as e:
+            print(f"[_sync_web_search HTML search error for '{q}']: {e}")
+
+        if len(items) >= max_results:
+            break
+
     if not items:
         try:
             with DDGS() as ddgs:
@@ -164,7 +194,8 @@ def _sync_web_search(query: str, max_results: int = 5) -> Tuple[str, List[Dict[s
                     t = r.get("title", "").strip()
                     l = _clean_url(r.get("href", "").strip())
                     s = r.get("body", "").strip()
-                    if t and l:
+                    if t and l and l not in seen_links:
+                        seen_links.add(l)
                         items.append({"title": t, "link": l, "snippet": s})
         except Exception as e:
             print(f"[_sync_web_search ddgs fallback error for '{query}']: {e}")
@@ -176,6 +207,7 @@ def _sync_web_search(query: str, max_results: int = 5) -> Tuple[str, List[Dict[s
     for it in items:
         lines.append(f"- **Başlık**: {it['title']}\n  **Link**: {it['link']}\n  **Özet**: {it['snippet']}")
     return "\n\n".join(lines), items
+
 
 class NvidiaProvider(BaseProvider):
     provider_name: str = "NVIDIA NIM"
@@ -192,7 +224,8 @@ class NvidiaProvider(BaseProvider):
             self._client = AsyncOpenAI(
                 base_url=settings.NVIDIA_BASE_URL,
                 api_key=api_key,
-                timeout=settings.DEFAULT_TIMEOUT_SECONDS
+                timeout=settings.DEFAULT_TIMEOUT_SECONDS,
+                max_retries=2
             )
         return self._client
 
@@ -201,6 +234,29 @@ class NvidiaProvider(BaseProvider):
 
     async def check_health(self) -> bool:
         return bool(settings.NVIDIA_API_KEY.strip())
+
+    async def _call_api_with_retry(self, kwargs: dict, max_retries: int = 2):
+        """Execute chat completions with connection error recovery and socket pool refresh."""
+        for attempt in range(max_retries + 1):
+            try:
+                client = self._get_client()
+                if client is None:
+                    raise RuntimeError("NVIDIA API key not configured")
+                return await client.chat.completions.create(**kwargs)
+            except Exception as err:
+                err_str = str(err).lower()
+                is_conn_error = isinstance(err, APIConnectionError) or any(
+                    k in err_str for k in [
+                        "connection error", "nodename nor servname", "connecterror",
+                        "connection reset", "broken pipe", "temporary failure in name resolution"
+                    ]
+                )
+                if is_conn_error and attempt < max_retries:
+                    print(f"[NVIDIA NIM Connection Warning] Retry {attempt+1}/{max_retries} due to: {err}")
+                    self.reload_client()  # Discard stale connection pool
+                    await asyncio.sleep(1.0 * (attempt + 1))
+                else:
+                    raise
 
     async def generate(
         self,
@@ -231,7 +287,6 @@ class NvidiaProvider(BaseProvider):
         image_attachments = []
         if attachments:
             for item in attachments:
-                # Support Pydantic model or dict
                 ftype = getattr(item, "file_type", None) or (item.get("file_type") if isinstance(item, dict) else "")
                 fname = getattr(item, "filename", None) or (item.get("filename") if isinstance(item, dict) else "Attachment")
                 text = getattr(item, "extracted_text", None) or (item.get("extracted_text") if isinstance(item, dict) else "")
@@ -240,8 +295,7 @@ class NvidiaProvider(BaseProvider):
 
                 if ftype == "image" and durl:
                     image_attachments.append({"filename": fname, "data_url": durl})
-                
-                # If PDF has rendered page images, add them for vision models
+
                 if pimages:
                     for p_idx, p_url in enumerate(pimages):
                         image_attachments.append({"filename": f"{fname} Sayfa {p_idx+1}", "data_url": p_url})
@@ -257,8 +311,7 @@ class NvidiaProvider(BaseProvider):
             model_info is not None and any(t in ["vision", "multimodal"] for t in model_info.tags)
         )
 
-        # If user attached visual images / circuit drawings, but this model cannot see them,
-        # return a clear, immediate notice rather than letting the text model hallucinate or apologize.
+        # Non-vision model safety guard
         if image_attachments and not is_vision:
             img_names = ", ".join([img["filename"] for img in image_attachments[:2]])
             return ProviderResponse(
@@ -267,8 +320,8 @@ class NvidiaProvider(BaseProvider):
                 provider=provider_name,
                 response_text=(
                     f"⚠️ **Görsel / Şema Uyarısı ({model_name})**\n\n"
-                    f"Bu model **saf metin ve kod** odaklıdır; yüklediğiniz görsel veya devre şemasını ({img_names}) doğrudan algılayamaz. Tahmin yürüterek uydurma devre formülleri üretmesi ve yanıltıcı değerler vermesi engellenmiştir.\n\n"
-                    f"👉 **Doğru Çözüm İçin:** Devre şemalarını ve çizimleri piksel düzeyinde inceleyen **Nemotron Super VL 120B** veya **Llama 3.2 90B Vision** modelini kullanınız."
+                    f"Bu model **saf metin ve kod** odaklıdır; yüklediğiniz görsel veya devre şemasını ({img_names}) doğrudan algılayamaz. Yanıltıcı tahminler üretmesi engellenmiştir.\n\n"
+                    f"👉 **Doğru Çözüm İçin:** Görselleri ve devre çizimlerini piksel düzeyinde inceleyen **Nemotron Super VL 120B** modelini kullanınız."
                 ),
                 response_time_ms=5.0,
                 status="success",
@@ -278,28 +331,46 @@ class NvidiaProvider(BaseProvider):
         messages = []
         effective_sys = system_prompt
 
-        # Build a strong system prompt for vision+homework tasks
+        # Universal STEM & Vision Problem-Solving Protocol
         if image_attachments and is_vision:
             vision_guidance = (
-                "Sen uzman bir Elektrik-Elektronik Mühendisi ve akademik asistansın. "
-                "Kullanıcının yüklediği görseldeki devre şemalarını piksel düzeyinde düğüm düğüm (nodal) dikkatle analiz et:\n"
-                "1. Op-Amp Devreleri: Giriş gerilim kaynağının evirmeyen (+) uca mı, eviren (-) uca mı bağlı olduğunu kesinlikle kontrol et. "
-                "(+) uçta dirençli gerilim bölücü varsa önce V+ gerilimini hesapla; asla ezbere sanal toprak (V+=0) varsayma! "
-                "Evirmeyen yükselteç konfigürasyonunda Vo = V+ * (1 + Rf / Rin) formülünü uygula.\n"
-                "2. Diyot Devreleri: Diyotların anot/katot yönünü ve çıkış düğümünün (Vo) hangi direncin üzerinde olduğunu doğrula. "
-                "Diyot seriye bağlıysa çıkış Vo = Vs - VD mi yoksa paralel eleman üzerindeki gerilim mi olduğunu doğru tespit et.\n"
-                "3. Transistör Devreleri: Gerilim kaynaklarının polaritesine (+, -) ve toprak bağlantılarına dikkat et. Şemada fiziksel olarak yer almayan elemanları (örneğin kolektörde direnç yoksa Rc direnci) asla uydurma.\n"
-                "4. ASLA İngilizce iç monolog, 'Let me re-read...', 'Actually...' gibi karalama yazma; doğrudan Türkçe, her soru için (S-1, S-2, S-3, S-4) devre okuması, KVL/KCL formülleri ve kutucuklu nihai sayısal sonuç sun.\n"
-                "5. Matematiksel formülleri standart LaTeX ($$ ... $$ ve $ ... $) ile yaz ve açtığın her \\boxed{...} parantezini eksiksiz kapat."
+                "Sen üst düzey bir STEM (Mühendislik, Fizik, Matematik, Kimya) Uzman Asistanısın. "
+                "Yüklenen görseldeki ödev ve sınav sorularını çözerken ASLA ezbere kalıplara veya şablonlara güvenme. "
+                "Hangi alandan olursa olsun her türlü soru için şu 4 aşamalı analitik protokolü adım adım uygula:\n\n"
+                "1. AŞAMA - PİKSEL DÜZEYİNDE ŞEMA VE VERİ ENVANTERİ:\n"
+                "- Görseldeki her bir elemanı, bağlantıyı, değişkeni, polariteyi (+ / - işaretleri), ok yönlerini ve referans noktalarını (toprak, orijin) doğrudan şemadan oku.\n"
+                "- ASLA şemada çizilmemiş bir elemanı, kuvveti, direnci veya kaynağı uydurma.\n"
+                "- Giriş ve referans terminallerinin nereye bağlandığını fiziksel olarak doğrula.\n\n"
+                "2. AŞAMA - İLK İLKELERDEN TÜRETME (FIRST-PRINCIPLES):\n"
+                "- Temel kanunları doğrudan şemaya uygula (KVL, KCL, Düğüm Gerilimleri, Ohm Kanunu, Newton Yasaları, Enerji Korunumu).\n"
+                "- Bir hazır formül kullanılacaksa, şemanın o formülün tüm ön koşullarını sağladığını önce açıkça kanıtla.\n\n"
+                "3. AŞAMA - ADIM ADIM SAYISAL VE ANALİTİK ÇÖZÜM:\n"
+                "- Önce sembolik genel denklemi yaz, ardından şemadan okunan sayısal değerleri birimleriyle yerine koy.\n"
+                "- Denklem çözümlerini ve ara basamakları açıkça göster.\n\n"
+                "4. AŞAMA - OTO-DOĞRULAMA VE SAĞLAMA (SANITY CHECK):\n"
+                "- Birim Analizi, Mantık ve Polarite Kontrolü, Sınır Değer Kontrolü yap.\n\n"
+                "SUNUM KURALLARI:\n"
+                "- ASLA 'Another possibility', 'possibly', 'if 8k', 'let me think' gibi İngilizce düşünce notları veya karalama maddeleri yazma.\n"
+                "- Görseldeki tüm soruları (S-1'den başlayarak sırayla) doğrudan Türkçe, akademik ve düzenli bir ödev formatında baştan sona çöz.\n"
+                "- Her sorunun nihai sayısal/analitik sonucunu \\boxed{...} içine alarak vurgula.\n"
+                "- Açtığın her \\boxed{...} parantezini ve LaTeX matematik ortamını ($$ ... $$) eksiksiz kapat."
             )
             effective_sys = f"{effective_sys}\n\n{vision_guidance}" if effective_sys else vision_guidance
+
+            # Auto-enrich short casual prompts (e.g. "ödevimi yapmaya yardım eder misin", "ödev")
+            short_hw_trigger = any(kw in prompt.lower() for kw in ["ödev", "yardım", "çöz", "buna bak", "soru", "devre", "hesapla", "yap"]) or len(prompt.strip()) < 60
+            if short_hw_trigger:
+                effective_prompt = (
+                    f"{effective_prompt}\n\n"
+                    f"[Yönerge: Lütfen görseldeki tüm soruları sırayla ve eksiksiz, ilk ilkelerden adım adım türeterek Türkçe akademik formatta çöz ve her sorunun nihai sonucunu \\boxed{{...}} içine al.]"
+                )
 
         if effective_sys:
             messages.append({"role": "system", "content": effective_sys})
 
         if image_attachments and is_vision:
             content_blocks = [{"type": "text", "text": effective_prompt}]
-            for img in image_attachments[:5]:  # send up to 5 visual diagrams/pages
+            for img in image_attachments[:5]:
                 content_blocks.append({
                     "type": "image_url",
                     "image_url": {"url": img["data_url"]}
@@ -308,40 +379,35 @@ class NvidiaProvider(BaseProvider):
         else:
             messages.append({"role": "user", "content": effective_prompt})
 
-        # Generous limits for multi-problem visual exam, deep reasoning, and long tables
-        effective_max_tokens = 8192
-        # Nemotron Super VL 120B uses a "thinking" budget on top of output tokens.
-        # When content=None but reasoning_content is populated it means the model
-        # used all tokens on thinking (finish_reason='length'). We bump the budget
-        # to 16384 for vision models so there is room for BOTH thinking AND the
-        # actual answer text.
-        if is_vision or image_attachments:
-            effective_max_tokens = 16384
+        effective_max_tokens = 16384 if (is_vision or image_attachments) else 8192
         effective_timeout = max(timeout or 90.0, 150.0)
+        # Low temperature for STEM / Vision homework to eliminate wandering & hallucinations
+        model_temperature = 0.15 if (is_vision or image_attachments) else 0.7
 
         start_time = time.perf_counter()
 
         try:
-            # Autonomous Tool Capability: all models autonomously decide when to call web_search
-            tools_param = AVAILABLE_TOOLS
-            tool_choice_param = "auto"
+            # Autonomous Tool Capability: only enable tools for pure text models
+            # NEVER pass tools to vision models to avoid <tool_call> token degeneration
+            use_tools = not is_vision and not image_attachments
+            api_kwargs = {
+                "model": model_id,
+                "messages": messages,
+                "temperature": model_temperature,
+                "max_tokens": effective_max_tokens,
+                "timeout": effective_timeout,
+            }
+            if use_tools:
+                api_kwargs["tools"] = AVAILABLE_TOOLS
+                api_kwargs["tool_choice"] = "auto"
 
-            completion_coroutine = client.chat.completions.create(
-                model=model_id,
-                messages=messages,
-                temperature=0.7,
-                max_tokens=effective_max_tokens,
-                timeout=effective_timeout,
-                tools=tools_param,
-                tool_choice=tool_choice_param
-            )
-            completion = await asyncio.wait_for(completion_coroutine, timeout=effective_timeout)
-            
+            completion = await self._call_api_with_retry(api_kwargs)
             msg = completion.choices[0].message
 
-            # Autonomous Tool Execution (ReAct Loop)
             collected_search_items: List[Dict[str, str]] = []
-            if msg.tool_calls:
+
+            # 1. Native OpenAI tool call handling
+            if getattr(msg, "tool_calls", None):
                 messages.append(msg)
                 for tc in msg.tool_calls:
                     fn_name = tc.function.name
@@ -362,101 +428,108 @@ class NvidiaProvider(BaseProvider):
                             "content": f"[Canlı Arama Sonuçları - '{search_q}']:\n{search_obs}"
                         })
 
-                # Follow-up directive to ensure synthesis into grounded markdown response
                 messages.append({
                     "role": "user",
-                    "content": "Canlı arama tamamlandı. Lütfen yukarıdaki arama sonuçlarında yer alan çalışan doğrudan bağlantıları ([Başlık](URL) biçiminde) ve gerçek pozisyonları kullanarak kullanıcının sorusuna doğrudan, eksiksiz ve profesyonel Türkçe nihai cevabını yaz."
+                    "content": "Canlı arama tamamlandı. Lütfen yukarıdaki arama sonuçlarında yer alan doğrudan başvuru ve kariyer bağlantılarını ([Pozisyon / Kurum](URL) biçiminde) listele. Asla genel tavsiye veya hayali/örnek JSON sunma; bulunan gerçek platform ve aktif ilanları detaylandırarak profesyonel Türkçe nihai cevabını yaz."
                 })
 
-                # Second turn: Generate final response grounded in live web findings
-                second_coroutine = client.chat.completions.create(
-                    model=model_id,
-                    messages=messages,
-                    temperature=0.7,
-                    max_tokens=effective_max_tokens,
-                    timeout=effective_timeout
-                )
-                second_completion = await asyncio.wait_for(second_coroutine, timeout=effective_timeout)
+                second_kwargs = {
+                    "model": model_id,
+                    "messages": messages,
+                    "temperature": 0.5,
+                    "max_tokens": effective_max_tokens,
+                    "timeout": effective_timeout
+                }
+                second_completion = await self._call_api_with_retry(second_kwargs)
                 final_msg = second_completion.choices[0].message
                 content = final_msg.content or getattr(final_msg, "reasoning_content", "") or ""
+
+            # 2. Text-embedded tool call handling
             elif msg.content and "<tool_call>" in msg.content:
-                # Some models (like Nemotron text variants) occasionally format tool calls directly as XML in message content
-                qm = re.search(r"<parameter=query>([\s\S]*?)</parameter>", msg.content)
-                if not qm:
-                    qm = re.search(r'query["\']?\s*:\s*["\']([^"\']+)["\']', msg.content)
-                search_q = qm.group(1).strip() if qm else prompt[:60]
+                # Catch degenerate loops of <tool_call> without valid query
+                is_degenerate_loop = msg.content.count("<tool_call>") >= 3 and "<parameter" not in msg.content and "query" not in msg.content
+                if is_degenerate_loop:
+                    # Rerun cleanly without tools
+                    clean_kwargs = {
+                        "model": model_id,
+                        "messages": messages,
+                        "temperature": 0.3,
+                        "max_tokens": effective_max_tokens,
+                        "timeout": effective_timeout,
+                    }
+                    clean_completion = await self._call_api_with_retry(clean_kwargs)
+                    clean_msg = clean_completion.choices[0].message
+                    content = clean_msg.content or getattr(clean_msg, "reasoning_content", "") or ""
+                else:
+                    qm = re.search(r"<parameter=query>([\s\S]*?)</parameter>", msg.content)
+                    if not qm:
+                        qm = re.search(r'query["\']?\s*:\s*["\']([^"\']+)["\']', msg.content)
+                    search_q = qm.group(1).strip() if qm else prompt[:60]
 
-                search_obs, items = await asyncio.to_thread(_sync_web_search, search_q, 6)
-                if items:
-                    collected_search_items.extend(items)
+                    search_obs, items = await asyncio.to_thread(_sync_web_search, search_q, 6)
+                    if items:
+                        collected_search_items.extend(items)
 
-                messages.append({"role": "assistant", "content": f"Arama yapılıyor: {search_q}"})
-                messages.append({
-                    "role": "user",
-                    "content": f"[Canlı Arama Sonuçları - '{search_q}']:\n{search_obs}\n\nCanlı arama tamamlandı. Lütfen yukarıdaki arama sonuçlarında yer alan çalışan doğrudan bağlantıları ([Başlık](URL) biçiminde) ve gerçek pozisyonları kullanarak kullanıcının sorusuna doğrudan, eksiksiz ve profesyonel Türkçe nihai cevabını yaz."
-                })
+                    messages.append({"role": "assistant", "content": f"Arama yapılıyor: {search_q}"})
+                    messages.append({
+                        "role": "user",
+                        "content": f"[Canlı Arama Sonuçları - '{search_q}']:\n{search_obs}\n\nCanlı arama tamamlandı. Lütfen yukarıdaki arama sonuçlarında yer alan doğrudan başvuru ve kariyer bağlantılarını ([Pozisyon / Kurum](URL) biçiminde) listele. Asla genel tavsiye veya hayali/örnek JSON sunma; bulunan gerçek platform ve aktif ilanları detaylandırarak profesyonel Türkçe nihai cevabını yaz."
+                    })
 
-                second_coroutine = client.chat.completions.create(
-                    model=model_id,
-                    messages=messages,
-                    temperature=0.7,
-                    max_tokens=effective_max_tokens,
-                    timeout=effective_timeout
-                )
-                second_completion = await asyncio.wait_for(second_coroutine, timeout=effective_timeout)
-                final_msg = second_completion.choices[0].message
-                content = final_msg.content or getattr(final_msg, "reasoning_content", "") or ""
+                    second_kwargs = {
+                        "model": model_id,
+                        "messages": messages,
+                        "temperature": 0.5,
+                        "max_tokens": effective_max_tokens,
+                        "timeout": effective_timeout
+                    }
+                    second_completion = await self._call_api_with_retry(second_kwargs)
+                    final_msg = second_completion.choices[0].message
+                    content = final_msg.content or getattr(final_msg, "reasoning_content", "") or ""
+
+            # 3. Direct response or CoT / reasoning handling
             else:
-                # --- PRIMARY FIX ---
-                # Nemotron Super VL 120B (and similar reasoning models) place their
-                # chain-of-thought in `reasoning_content` and the final answer in
-                # `content`.  When finish_reason=='length' (token budget exhausted
-                # during the thinking phase), `content` is None while
-                # `reasoning_content` holds a half-finished internal monologue.
-                # In that case we do a SECOND call without tools so the model just
-                # writes its answer directly, skipping the thinking phase.
                 raw_content = msg.content
                 raw_reasoning = getattr(msg, "reasoning_content", None)
 
-                if raw_content:
+                # Check if output is raw unstructured English scratchpad (Image 3 issue)
+                if raw_content and (is_vision or image_attachments) and _is_unstructured_cot(raw_content):
+                    retry_messages = messages + [
+                        {"role": "assistant", "content": raw_content},
+                        {"role": "user", "content": "Tüm ara adımları ve şema analizini tamamlayarak görseldeki her sorunun (S-1, S-2, S-3, S-4 vb.) Türkçe akademik çözümünü ve kutu içine alınmış (\\boxed{...}) nihai sonucunu eksiksiz yaz."}
+                    ]
+                    retry_kwargs = {
+                        "model": model_id,
+                        "messages": retry_messages,
+                        "temperature": 0.15,
+                        "max_tokens": effective_max_tokens,
+                        "timeout": effective_timeout
+                    }
+                    retry_completion = await self._call_api_with_retry(retry_kwargs)
+                    retry_msg = retry_completion.choices[0].message
+                    content = retry_msg.content or getattr(retry_msg, "reasoning_content", "") or ""
+                elif raw_content:
                     content = raw_content
                 elif raw_reasoning:
-                    # Token budget hit during thinking. Try again with higher limit
-                    # and explicit instruction to output the answer, not thoughts.
+                    # Token budget exhausted in reasoning mode; synthesize final answer
                     retry_messages = messages + [
-                        {
-                            "role": "assistant",
-                            "content": "Analiz tamamlandı. Aşağıda doğrudan Türkçe cevabı sunuyorum:"
-                        }
+                        {"role": "assistant", "content": "Analiz tamamlandı. Aşağıda doğrudan Türkçe çözümü sunuyorum:"}
                     ]
-                    retry_coroutine = client.chat.completions.create(
-                        model=model_id,
-                        messages=retry_messages,
-                        temperature=0.3,
-                        max_tokens=effective_max_tokens,
-                        timeout=effective_timeout
-                    )
-                    retry_completion = await asyncio.wait_for(retry_coroutine, timeout=effective_timeout)
+                    retry_kwargs = {
+                        "model": model_id,
+                        "messages": retry_messages,
+                        "temperature": 0.2,
+                        "max_tokens": effective_max_tokens,
+                        "timeout": effective_timeout
+                    }
+                    retry_completion = await self._call_api_with_retry(retry_kwargs)
                     retry_msg = retry_completion.choices[0].message
                     content = retry_msg.content or getattr(retry_msg, "reasoning_content", "") or ""
                 else:
                     content = ""
 
-            # ----------------------------------------------------------------
-            # Final scrubbing pipeline — mirrors how ChatGPT/Gemini/Claude hide
-            # their internal reasoning before presenting the user-facing answer.
-            # ----------------------------------------------------------------
-            # 1. Strip XML-delimited thinking blocks & stray tool tags
+            # Final thorough scrubbing pipeline
             content = _scrub_thinking(content)
-            # 2. Remove any residual tool-call XML fragments
-            for pat in [
-                r"<tool_call>[\s\S]*?</tool_call>",
-                r"<tool_call>", r"</tool_call>",
-                r"<function=[\w_]+>", r"</function>",
-                r"<parameter=[\w_]+>", r"</parameter>",
-            ]:
-                content = re.sub(pat, "", content)
-            content = content.strip()
 
             elapsed_ms = round((time.perf_counter() - start_time) * 1000, 2)
 
@@ -480,7 +553,7 @@ class NvidiaProvider(BaseProvider):
                 response_text=None,
                 response_time_ms=elapsed_ms,
                 status="timeout",
-                error_message=f"Model response timed out after {effective_timeout} seconds."
+                error_message=f"Model yanıtı {effective_timeout} saniye içinde zaman aşımına uğradı."
             )
 
         except AuthenticationError:
@@ -492,7 +565,7 @@ class NvidiaProvider(BaseProvider):
                 response_text=None,
                 response_time_ms=elapsed_ms,
                 status="error",
-                error_message="Authentication failed: Invalid or expired NVIDIA API Key."
+                error_message="Kimlik doğrulama başarısız: Geçersiz veya süresi dolmuş NVIDIA API anahtarı."
             )
 
         except RateLimitError as e:
@@ -504,7 +577,7 @@ class NvidiaProvider(BaseProvider):
                 response_text=None,
                 response_time_ms=elapsed_ms,
                 status="error",
-                error_message=f"Rate limit exceeded on NVIDIA NIM: {str(e)}"
+                error_message=f"NVIDIA NIM istek limiti aşıldı: {str(e)}"
             )
 
         except APIError as e:
@@ -516,7 +589,7 @@ class NvidiaProvider(BaseProvider):
                 response_text=None,
                 response_time_ms=elapsed_ms,
                 status="error",
-                error_message=f"NVIDIA API Error: {str(e)}"
+                error_message=f"NVIDIA API Hatası: {str(e)}"
             )
 
         except Exception as e:
@@ -528,7 +601,7 @@ class NvidiaProvider(BaseProvider):
                 response_text=None,
                 response_time_ms=elapsed_ms,
                 status="error",
-                error_message=f"Unexpected error: {str(e)}"
+                error_message=f"Beklenmeyen hata: {str(e)}"
             )
 
 nvidia_provider = NvidiaProvider()
