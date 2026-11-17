@@ -286,7 +286,9 @@ class NvidiaProvider(BaseProvider):
                 "ASLA İngilizce iç monolog, 'Let me re-read...', 'Actually...', 'Wait...' gibi karalama cümlesi yazma. "
                 "Doğrudan kullanıcıya hitap et: her soru için (S-1, S-2, S-3, S-4) "
                 "devre okuma → kullanılan yasa/formül → adım adım hesap → kutucuklu sayısal sonuç "
-                "şeklinde Türkçe ve tertemiz bir ödev çözümü sun."
+                "şeklinde Türkçe ve tertemiz bir ödev çözümü sun. "
+                "Matematiksel formülleri standart LaTeX biçiminde yaz (display için $$ ... $$, satır içi için $ ... $). "
+                "Açtığın her \\boxed{...} parantezini ve \\begin{aligned}...\\end{aligned} bloğunu eksiksiz kapat."
             )
             effective_sys = f"{effective_sys}\n\n{vision_guidance}" if effective_sys else vision_guidance
 

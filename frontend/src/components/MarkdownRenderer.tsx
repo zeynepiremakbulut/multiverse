@@ -11,59 +11,126 @@ interface MarkdownRendererProps {
 }
 
 /**
+ * Sanitizes the inner content of a single LaTeX math block ($...$ or $$...$$):
+ * - Fixes invalid math commands inside \text{...} like \text{\mu A} -> \mu\text{A} and \text{\Omega} -> \Omega
+ * - Escapes raw unescaped % inside math (which comments out lines in LaTeX)
+ * - Removes accidental internal dollar signs
+ * - Normalizes single-backslash row breaks in matrices/aligned blocks to \\
+ * - Auto-balances unclosed curly braces (e.g. unclosed \boxed{ or \frac{...)
+ */
+function sanitizeMathInner(raw: string): string {
+  let m = raw;
+
+  // 1. Fix \mu and \Omega inside \text{...}
+  m = m.replace(/\\text\{([^{}]*?)\\mu([^{}]*?)\}/g, (_, before, after) => {
+    return (before ? `\\text{${before}}` : '') + '\\mu ' + (after ? `\\text{${after}}` : '');
+  });
+  m = m.replace(/\\text\{([^{}]*?)\\Omega([^{}]*?)\}/g, (_, before, after) => {
+    return (before ? `\\text{${before}}` : '') + '\\Omega ' + (after ? `\\text{${after}}` : '');
+  });
+
+  // 2. Fix unescaped % inside math
+  m = m.replace(/(?<!\\)%/g, '\\%');
+
+  // 3. Remove stray internal $ signs inside math
+  m = m.replace(/\$/g, '');
+
+  // 4. Fix single backslash row breaks in matrix / aligned
+  m = m.replace(
+    /(\\begin\{(?:pmatrix|matrix|bmatrix|vmatrix|Vmatrix|aligned)\}[\s\S]*?\\end\{(?:pmatrix|matrix|bmatrix|vmatrix|Vmatrix|aligned)\})/g,
+    (match) => match.replace(/(?<!\\)\\\s+(?=\\frac|[-0-9a-zA-Z\\])/g, '\\\\ ')
+  );
+
+  // 5. Fix unbalanced curly braces (e.g. unclosed \boxed{ or \frac{...})
+  const openBraces = (m.match(/\{/g) || []).length;
+  const closeBraces = (m.match(/\}/g) || []).length;
+  if (openBraces > closeBraces) {
+    m = m + '}'.repeat(openBraces - closeBraces);
+  }
+
+  return m;
+}
+
+/**
  * Preprocesses LaTeX equations and formatting produced by LLMs to ensure standard KaTeX parsing:
+ * - Protects code blocks from regex modifications
  * - Normalizes \[ ... \] to $$ ... $$ (display math)
  * - Normalizes \( ... \) to $ ... $ (inline math)
  * - Converts raw bracketed matrix environments [ U = \begin{pmatrix} ... \end{pmatrix} ] to $$ ... $$
  * - Wraps naked LaTeX environments in $$ ... $$
- * - Fixes naked symbols like \to, \Omega, \approx outside math tags
- * - Fixes unclosed single dollar signs ($) on individual lines
- * - Fixes single-backslash row breaks in matrices to \\
+ * - Sanitizes all math blocks (fixing invalid \text{\mu}, unclosed \boxed{, etc.)
+ * - Protects math blocks before safely converting naked prose symbols like \to, \Omega outside math
+ * - Auto-closes dangling unclosed dollar signs from truncated responses
  */
 function preprocessLaTeX(content: string): string {
   if (!content) return '';
 
   let text = content;
 
-  // 1. Convert standard LaTeX display math \[ ... \] to $$ ... $$
+  // 1. Protect code blocks from being modified
+  const codeBlocks: Array<{ placeholder: string; match: string }> = [];
+  text = text.replace(/(```[\s\S]*?```|`[^`\n]+?`)/g, (match) => {
+    const placeholder = `__CODE_BLOCK_${codeBlocks.length}__`;
+    codeBlocks.push({ placeholder, match });
+    return placeholder;
+  });
+
+  // 2. Standardize LaTeX display math \[ ... \] to $$ ... $$
   text = text.replace(/\\\[([\s\S]*?)\\\]/g, (_, math) => `\n\n$$\n${math.trim()}\n$$\n\n`);
 
-  // 2. Convert standard LaTeX inline math \( ... \) to $ ... $
+  // 3. Standardize LaTeX inline math \( ... \) to $ ... $
   text = text.replace(/\\\(([\s\S]*?)\\\)/g, (_, math) => `$${math.trim()}$`);
 
-  // 3. Convert square-bracketed display math like [ U = \begin{pmatrix} ... \end{pmatrix} ]
-  // or [ \lambda_1 = 3, \lambda_2 = 1 ] or [ x = \frac{a}{b} ] (excluding markdown links [text](url))
+  // 4. Convert bracketed math [ U = \begin{pmatrix} ... \end{pmatrix} ] to $$
   text = text.replace(
     /(?:^|(?<=[^\w\\]))\[\s*([^[\]\n]*?(?:\\begin|\\frac|\\sqrt|\\pmatrix|\\matrix|\\bmatrix|\\vmatrix|\\quad|\\alpha|\\beta|\\gamma|\\lambda|\\theta|\\pi|\\sum|\\int|\\partial|\\cdot|\\times|\\pm|\\mp|\\in|\\subset|\\mathbf|\\mathbb|\\det|\\sin|\\cos|\\tan)[\s\S]*?)\s*\](?!\()/g,
     (_, math) => `\n\n$$\n${math.trim()}\n$$\n\n`
   );
 
-  // 4. Wrap any naked \begin{matrix/pmatrix/cases...} not already enclosed in $$
+  // 5. Wrap naked \begin{matrix/pmatrix/cases/aligned...} in $$
   text = text.replace(
     /(?<!\$\$[\s\S]*?)(\\begin\{(?:pmatrix|matrix|bmatrix|vmatrix|Vmatrix|cases|aligned|align|gather)\}[\s\S]*?\\end\{(?:pmatrix|matrix|bmatrix|vmatrix|Vmatrix|cases|aligned|align|gather)\})/g,
     (match) => `\n\n$$\n${match.trim()}\n$$\n\n`
   );
 
-  // 5. Fix single backslash row separators inside matrix blocks to double backslashes
-  text = text.replace(
-    /(\\begin\{(?:pmatrix|matrix|bmatrix|vmatrix|Vmatrix)\}[\s\S]*?\\end\{(?:pmatrix|matrix|bmatrix|vmatrix|Vmatrix)\})/g,
-    (match) => match.replace(/\\\s+(?=\\frac|[-0-9a-zA-Z\\])/g, '\\\\ ')
-  );
+  // 6. Sanitize existing $$ ... $$ display blocks
+  text = text.replace(/\$\$([\s\S]*?)\$\$/g, (_, block) => {
+    return `\n\n$$\n${sanitizeMathInner(block.trim())}\n$$\n\n`;
+  });
 
-  // 6. Wrap raw electronics & math symbols outside $...$ in math tags
-  // Fix arrows like \to or \rightarrow
-  text = text.replace(/(?<!\$)\\(?:to|rightarrow)(?!\$)/g, ' $\\to$ ');
-  // Fix Ohm symbols like 5k\Omega, \Omega, M\Omega
-  text = text.replace(/([0-9.]+)?\s*(?:k|M|m)?\\Omega/g, (match) => ` $${match.trim()}$ `);
-  // Fix micro symbols like \muA, \muF outside math
-  text = text.replace(/(?<!\$)\\(?:mu|micro)\s*(A|F|V|s)?(?!\$)/g, (_, unit) => ` $\\mu${unit ? `\\text{${unit}}` : ''}$ `);
+  // 7. Sanitize existing $ ... $ inline blocks
+  text = text.replace(/(?<!\$)\$([^\$\n]+?)\$(?!\$)/g, (_, inline) => {
+    return `$${sanitizeMathInner(inline.trim())}$`;
+  });
 
-  // 7. Fix ?=I2 query tags from circuit labelings
+  // 8. Outside of math blocks, protect math blocks before fixing prose symbols
+  const mathBlocks: Array<{ placeholder: string; match: string }> = [];
+  text = text.replace(/(\$\$[\s\S]*?\$\$|\$[^\$\n]+?\$)/g, (match) => {
+    const placeholder = `__MATH_BLOCK_${mathBlocks.length}__`;
+    mathBlocks.push({ placeholder, match });
+    return placeholder;
+  });
+
+  // Safely fix symbols in prose (arrows, Ohm, micro)
+  text = text.replace(/\\(?:to|rightarrow)\b/g, ' $\\to$ ');
+  text = text.replace(/([0-9.]+)?\s*(?:k|M|m)?\\Omega\b/g, (match) => ` $${match.trim()}$ `);
+  text = text.replace(/\\(?:mu|micro)\s*(A|F|V|s|m)?\b/g, (_, unit) => ` $\\mu${unit ? `\\text{${unit}}` : ''}$ `);
   text = text.replace(/\?=(I[0-9a-zA-Z_]+|V[0-9a-zA-Z_]+)/g, '($1 = ?)');
 
-  // 8. Fix unclosed dollar signs across lines or at the end of cut-off responses
+  // Restore math blocks
+  mathBlocks.forEach(({ placeholder, match }) => {
+    text = text.replace(placeholder, match);
+  });
+
+  // Restore code blocks
+  codeBlocks.forEach(({ placeholder, match }) => {
+    text = text.replace(placeholder, match);
+  });
+
+  // 9. Auto-close dangling unclosed single dollars
   const lines = text.split('\n');
   const fixedLines = lines.map((line) => {
+    if (line.includes('$$')) return line;
     const matches = line.match(/(?<!\\)\$/g);
     if (matches && matches.length % 2 !== 0) {
       return line.trimEnd() + '$';
@@ -72,13 +139,12 @@ function preprocessLaTeX(content: string): string {
   });
   text = fixedLines.join('\n');
 
-  // If entire text has odd number of dollar signs, append closing dollar
   const globalDollarMatches = text.match(/(?<!\\)\$/g);
   if (globalDollarMatches && globalDollarMatches.length % 2 !== 0) {
     text = text.trimEnd() + '$';
   }
 
-  // 9. Fix dangling unclosed markdown brackets or bold markers at the end of cut-off responses
+  // 10. Fix dangling unclosed markdown brackets or bold markers
   const openBrackets = (text.match(/\[/g) || []).length;
   const closeBrackets = (text.match(/\]/g) || []).length;
   if (openBrackets > closeBrackets) {
